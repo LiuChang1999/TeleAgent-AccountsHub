@@ -18,8 +18,8 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "TeleAgent Account Desk\0"
    VALUE "ProductName", "TeleAgent Account Desk\0"
-   VALUE "FileVersion", "0.7.0\0"
-   VALUE "ProductVersion", "0.7.0\0"
+   VALUE "FileVersion", "0.7.1\0"
+   VALUE "ProductVersion", "0.7.1\0"
    VALUE "OriginalFilename", "TeleAgentAccounts.exe\0"
   END
  END

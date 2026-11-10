@@ -38,12 +38,55 @@ Installation findInstallation(const fs::path& state){Candidates list;
     found=firstValid(list);if(!found.exe.empty())return found;shortcuts(list);return firstValid(list);
 }
 void rememberInstallation(const fs::path& state,const fs::path& exe){if(!validExecutable(exe))throw std::runtime_error("Select a valid TeleAgent.exe executable");privateDirectory(state);auto settings=loadJson(state/L"settings.json");settings["teleagentExecutable"]=utf8(fs::absolute(exe).lexically_normal().wstring());writeAtomic(state/L"settings.json",settings.dump());}
+fs::path savedDataRoot(const fs::path& state){try{auto value=loadJson(state/L"settings.json")["teleAgentDataRoot"].str();if(!value.empty())return fs::path(wide(value));}catch(...){}return {};}
+void rememberDataRoot(const fs::path& state,const fs::path& root){privateDirectory(state);auto settings=loadJson(state/L"settings.json");settings["teleAgentDataRoot"]=utf8(fs::absolute(root).lexically_normal().wstring());writeAtomic(state/L"settings.json",settings.dump());}
+int accountCount(const fs::path& root){
+    int count=0;
+    try{std::error_code ec;for(fs::directory_iterator it(root/L"users",fs::directory_options::skip_permission_denied,ec),end;it!=end;it.increment(ec)){if(ec){ec.clear();continue;}std::string name;std::error_code dir;try{name=utf8(it->path().filename().wstring());}catch(...){continue;}if(name.rfind("v1_public_",0)==0&&it->is_directory(dir))++count;}}catch(...){}
+    return count;
+}
+namespace {
+bool looksLikeDataRoot(const fs::path& p){
+    std::error_code ec;
+    if(!fs::is_directory(p,ec))return false;
+    return fs::is_directory(p/L"users",ec)||fs::exists(p/L"current-owner.json",ec)||(fs::is_directory(p/L"Partitions",ec)&&fs::is_directory(p/L"app-auth",ec));
+}
+}
+// TeleAgent is an Electron app that may keep its data outside %USERPROFILE%:
+// portable installs, a moved profile, XDG_DATA_HOME or a different drive. Try
+// every plausible location, keep a manually saved directory when it still
+// works, and otherwise take the candidate with the most accounts.
+DataRoot findDataRoot(const fs::path& state,const fs::path& exe){
+    std::vector<std::pair<fs::path,std::string>> candidates;
+    auto add=[&](const fs::path& p,const char* source){if(p.empty())return;auto normal=fs::absolute(p).lexically_normal();for(auto& c:candidates)if(c.first==normal)return;candidates.emplace_back(normal,source);};
+    auto saved=savedDataRoot(state);if(!saved.empty())add(saved,"手动选择并保存的目录");
+    auto home=env(L"USERPROFILE");
+    add(fs::path(home)/L".local"/L"share"/L"TeleAgent","默认位置");
+    auto xdg=env(L"XDG_DATA_HOME");if(!xdg.empty())add(fs::path(xdg)/L"TeleAgent","XDG 数据目录");
+    auto other=env(L"HOME");if(!other.empty())add(fs::path(other)/L".local"/L"share"/L"TeleAgent","用户目录");
+    auto appdata=env(L"APPDATA");if(!appdata.empty()){add(fs::path(appdata)/L"TeleAgent","漫游数据目录");add(fs::path(appdata)/L"teleagent","漫游数据目录");}
+    auto local=env(L"LOCALAPPDATA");if(!local.empty()){add(fs::path(local)/L"TeleAgent","本机数据目录");add(fs::path(local)/L"Programs"/L"TeleAgent","当前用户安装目录");}
+    add(fs::path(home)/L"TeleAgent","用户目录");
+    auto programData=env(L"ProgramData");if(!programData.empty())add(fs::path(programData)/L"TeleAgent","公共数据目录");
+    if(!exe.empty()){auto dir=exe.parent_path();add(dir/L"data","TeleAgent 程序目录");add(dir/L"TeleAgent","TeleAgent 程序目录");add(dir.parent_path()/L"TeleAgent","TeleAgent 程序上级目录");add(dir.parent_path()/L"data","TeleAgent 程序上级目录");}
+    if(!saved.empty()&&looksLikeDataRoot(saved))return {saved,"手动选择并保存的目录",true,accountCount(saved)};
+    DataRoot best;int bestScore=-1;
+    for(auto& candidate:candidates){
+        if(!looksLikeDataRoot(candidate.first))continue;
+        int score=accountCount(candidate.first);
+        if(score>bestScore){bestScore=score;best={candidate.first,candidate.second,true,score};}
+    }
+    if(best.valid)return best;
+    auto fallback=saved.empty()?fs::path(home)/L".local"/L"share"/L"TeleAgent":saved;
+    return {fallback,saved.empty()?"默认位置":"手动选择并保存的目录",false,0};
+}
 fs::path userStateDirectory(){wchar_t path[MAX_PATH];if(FAILED(SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,path)))throw std::runtime_error("Cannot find Windows local application data");return fs::path(path)/L"TeleAgentAccountDesk"/L"manager-data";}
 int installationSelfTest(const fs::path& directory){privateDirectory(directory);auto work=directory/L"installation-fixture";privateDirectory(work);Json::Array results;int failed=0;auto test=[&](const char* name,auto f){bool ok=f();if(!ok)++failed;results.emplace_back(Json::Object{{"test",name},{"passed",ok}});};wchar_t self[32768];GetModuleFileNameW(nullptr,self,32768);auto exe=fs::absolute(work/L"自定义 路径"/L"TeleAgent.exe");privateDirectory(exe.parent_path());fs::copy_file(self,exe,fs::copy_options::overwrite_existing);
     test("Quoted registry icon path with spaces",[&]{return executableFromValue(L"\""+exe.wstring()+L"\",0")==exe;});
     test("Unquoted registry icon path with spaces",[&]{return executableFromValue(exe.wstring()+L",0")==exe;});
     test("Executable validation rejects missing and non-PE files",[&]{writeAtomic(work/L"TeleAgent.exe","not an executable");return validExecutable(exe)&&!validExecutable(work/L"TeleAgent.exe")&&!validExecutable(work/L"missing.exe")&&!validExecutable(fs::path(L"TeleAgent.exe"));});
     test("Saved custom installation is discovered",[&]{rememberInstallation(work,exe);return findInstallation(work).exe==exe;});
+    test("Account data root detection counts owner directories",[&]{auto root=work/L"data-root";privateDirectory(root);privateDirectory(root/L"users"/L"v1_public_1001");privateDirectory(root/L"users"/L"v1_public_1002");privateDirectory(root/L"users"/L"__device_login__");privateDirectory(work/L"partitions-only"/L"Partitions");privateDirectory(work/L"partitions-only"/L"app-auth");privateDirectory(work/L"empty");return accountCount(root)==2&&looksLikeDataRoot(root)&&looksLikeDataRoot(work/L"partitions-only")&&!looksLikeDataRoot(work/L"empty")&&!looksLikeDataRoot(work/L"missing-root");});
     test("Stale candidate falls through to another installation",[&]{return firstValid({{work/L"missing"/L"TeleAgent.exe","old"},{exe,"custom"}}).exe==exe;});
     test("Invalid manual selection preserves previous configuration",[&]{auto before=readFile(work/L"settings.json");try{rememberInstallation(work,work/L"TeleAgent.exe");return false;}catch(...){return readFile(work/L"settings.json")==before;}});
     writeAtomic(directory/L"installation-tests.json",Json(Json::Object{{"failed",Json::num(failed)},{"tests",results}}).dump());return failed?2:0;

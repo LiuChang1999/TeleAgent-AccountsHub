@@ -35,7 +35,7 @@ fs::path managerExecutable;
 DesktopSettings preferences;
 std::string settingsWarning;
 bool fromAutostart=false;
-Installation installation;fs::path legacyState;
+Installation installation;DataRoot dataRootInfo;fs::path legacyState;
 Scan current;std::future<Scan> pending;
 struct ActionResult {bool success=false;std::wstring message;Json space={};};
 std::future<ActionResult> operation;
@@ -102,6 +102,7 @@ std::wstring translate(const std::exception& ex){std::string s=ex.what();
     if(s.find("Active agent tasks")!=std::string::npos)return L"TeleAgent 正在执行任务，已保留当前会话。任务结束后即可自动切换。";
     if(s.find("no saved login session")!=std::string::npos)return L"这个账号还没有已保存的登录会话。请先使用“重新登录”完成一次登录。";
     if(s.find("Cached identity")!=std::string::npos)return L"该分区缓存的身份属于其他账号，直接切换已被拦截。请使用“重新登录”，先备份再清理此账号的登录状态。";
+    if(s.find("Multiple partitions match one owner")!=std::string::npos)return L"这个账号在本机有两个浏览器分区目录（旧版本升级遗留），为避免覆盖已暂停该账号的切换和重新登录。其余账号不受影响。";
     if(s.find("New login")!=std::string::npos)return L"检测到新的登录数据，为避免覆盖，恢复已停止。旧资料仍在备份目录中。";
     if(s.find("No valid backup")!=std::string::npos)return L"还没有可恢复的操作备份。";
     if(s.find("already been restored")!=std::string::npos)return L"最近一次操作已恢复，或备份尚未完整结束。请查看备份目录。";
@@ -121,13 +122,25 @@ Json::Array backups(){
     for(auto& path:paths){if(rows.size()>=30)break;try{auto j=loadJson(path/L"transaction.json");if(!j.object())continue;rows.emplace_back(Json::Object{{"id",utf8(path.filename().wstring())},{"action",j["action"]},{"status",j["status"]},{"created",dateOf(path/L"transaction.json")}});}catch(...){}}
     return rows;
 }
-void publish(){updateTray();if(!loaded)return;try{Json j=publicReport(current);j["type"]="state";j["fixture"]=config.fixture;j["busy"]=acting;j["executable"]=utf8(config.exe.wstring());j["installationSource"]=installation.source;j["executableAvailable"]=validExecutable(config.exe);j["stateDirectory"]=utf8(config.state.wstring());j["dataRoot"]=utf8(config.root.wstring());j["legacyAvailable"]=!legacyState.empty();{std::lock_guard<std::mutex> lock(progressMutex);j["progress"]=utf8(operationProgress);}j["running"]=!teleagentProcesses(config).empty();j["backups"]=backups();j["organization"]=accountOrganization(config);j["history"]=operationHistory(config);j["backupSpace"]=backupSpace;j["polling"]=polling;j["pollStopRequested"]=polling&&stopPolling.load();j["pollReport"]=loadJson(config.state/L"last-poll.json");j["desktopSettings"]=desktopSettingsState(config,preferences,managerExecutable);j["settingsWarning"]=settingsWarning;SYSTEMTIME now{};GetLocalTime(&now);wchar_t date[64];swprintf(date,64,L"%02u:%02u:%02u",now.wHour,now.wMinute,now.wSecond);j["updated"]=utf8(date);send(j);}catch(const std::exception& e){toast(translate(e),true);}}
+void publish(){updateTray();if(!loaded)return;try{Json j=publicReport(current);j["type"]="state";j["warning"]=utf8(current.warning);j["fixture"]=config.fixture;j["busy"]=acting;j["executable"]=utf8(config.exe.wstring());j["installationSource"]=installation.source;j["executableAvailable"]=validExecutable(config.exe);j["stateDirectory"]=utf8(config.state.wstring());j["dataRoot"]=utf8(config.root.wstring());j["dataRootSource"]=dataRootInfo.source;j["dataRootValid"]=dataRootInfo.valid;j["dataRootAccounts"]=Json::num(dataRootInfo.accounts);j["legacyAvailable"]=!legacyState.empty();{std::lock_guard<std::mutex> lock(progressMutex);j["progress"]=utf8(operationProgress);}j["running"]=!teleagentProcesses(config).empty();j["backups"]=backups();j["organization"]=accountOrganization(config);j["history"]=operationHistory(config);j["backupSpace"]=backupSpace;j["polling"]=polling;j["pollStopRequested"]=polling&&stopPolling.load();j["pollReport"]=loadJson(config.state/L"last-poll.json");j["desktopSettings"]=desktopSettingsState(config,preferences,managerExecutable);j["settingsWarning"]=settingsWarning;SYSTEMTIME now{};GetLocalTime(&now);wchar_t date[64];swprintf(date,64,L"%02u:%02u:%02u",now.wHour,now.wMinute,now.wSecond);j["updated"]=utf8(date);send(j);}catch(const std::exception& e){toast(translate(e),true);}}
 bool selectExecutable(){
     if(config.fixture){toast(L"模拟模式不保存真实程序路径",true);return false;}
     wchar_t file[32768]{};if(!config.exe.empty())wcsncpy(file,config.exe.c_str(),32767);
     OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=window;dialog.lpstrFile=file;dialog.nMaxFile=32768;dialog.lpstrFilter=L"TeleAgent 程序 (TeleAgent.exe)\0TeleAgent.exe\0\0";dialog.lpstrTitle=L"选择已安装的 TeleAgent.exe";dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|OFN_DONTADDTORECENT;
     if(!GetOpenFileNameW(&dialog))return false;
     rememberInstallation(config.state,fs::path(file));config.exe=fs::path(file);installation={config.exe,"手动选择并保存的路径"};publish();return true;
+}
+void refresh();
+bool selectDataRoot(){
+    if(config.fixture){toast(L"模拟模式不保存真实账号目录",true);return false;}
+    BROWSEINFOW browse{};browse.hwndOwner=window;browse.lpszTitle=L"选择 TeleAgent 账号数据目录（包含 users 文件夹）";browse.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE item=SHBrowseForFolderW(&browse);if(!item)return false;
+    wchar_t folder[32768]{};bool ok=SHGetPathFromIDListW(item,folder);CoTaskMemFree(item);if(!ok)return false;
+    fs::path chosen(folder),target;
+    if(fs::is_directory(chosen/L"users"))target=chosen;
+    else if(fs::is_directory(chosen/L"TeleAgent"/L"users"))target=chosen/L"TeleAgent";
+    else{toast(L"这个目录里没有 users 文件夹，请选择 TeleAgent 的账号数据目录",true);return false;}
+    rememberDataRoot(config.state,target);config.root=target;dataRootInfo={target,"手动选择并保存的目录",true,accountCount(target)};lastScan=0;publish();refresh();toast(L"已切换到所选账号数据目录");return true;
 }
 bool ensureExecutable(){
     if(config.fixture)throw std::runtime_error("Automatic app control is disabled for fixture data");
@@ -165,8 +178,9 @@ void action(const Json& request){
             {std::lock_guard<std::mutex> lock(progressMutex);operationProgress=L"正在准备轮询登录…";pollNotices.clear();}publish();
             operation=std::async(std::launch::async,[owners](){try{
                 auto progress=[](const std::wstring& text){std::lock_guard<std::mutex> lock(progressMutex);operationProgress=text;};
-                auto notice=[](const std::wstring& text,bool error){std::lock_guard<std::mutex> lock(progressMutex);pollNotices.emplace_back(text,error);};
-                auto report=pollAccounts(config,owners,stopPolling,progress,notice);
+                // Silent: failures are recorded in the report and history, never
+                // surfaced as popups while the user keeps working.
+                auto report=pollAccounts(config,owners,stopPolling,progress);
                 return ActionResult{report["failed"].integer()==0&&!report["halted"].boolean()&&!report["cancelled"].boolean()&&report["restoreSuccess"].boolean(true),wide(report["summary"].str())};
             }catch(const std::exception& e){try{recordOperation(config,"poll","",false,e.what());}catch(...){}return ActionResult{false,translate(e)};}});return;
         }
@@ -185,6 +199,17 @@ void action(const Json& request){
         if(command=="backups"){privateDirectory(config.state);privateDirectory(config.state/L"backups");auto r=reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",(config.state/L"backups").c_str(),nullptr,nullptr,SW_SHOWNORMAL));if(r<=32)throw std::runtime_error("Cannot open backup directory");return;}
         if(command=="legacy-backups"){if(!legacyState.empty())ShellExecuteW(window,L"open",legacyState.c_str(),nullptr,nullptr,SW_SHOWNORMAL);return;}
         if(command=="choose-exe"){selectExecutable();return;}
+        if(command=="data-root"){selectDataRoot();return;}
+        if(command=="data-root-scan"){
+            if(config.fixture){toast(L"模拟模式不查找真实账号目录",true);return;}
+            auto found=findDataRoot(config.state,config.exe);
+            if(!found.valid){toast(L"没有找到账号数据。请先在 TeleAgent 中登录一次，或手动选择目录。",true);return;}
+            bool moved=found.path!=config.root;config.root=found.path;dataRootInfo=found;
+            if(moved)try{rememberDataRoot(config.state,found.path);}catch(...){}
+            lastScan=0;publish();refresh();
+            toast(moved?L"已找到账号数据（"+wide(found.source)+L"）":L"账号目录正常");
+            return;
+        }
         if(command=="open"){if(!ensureExecutable())return;if(teleagentProcesses(config).empty())launchManaged(config);else launchTeleagent(config);toast(L"已打开 TeleAgent");return;}
         if(command!="switch"&&command!="logout"&&command!="relogin"&&command!="restore"&&command!="new-login")return;
         // Resolve before stopping the application or changing any account data.
@@ -246,7 +271,7 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         }
         {std::vector<std::pair<std::wstring,bool>> notices;{std::lock_guard<std::mutex> lock(progressMutex);notices.swap(pollNotices);}for(auto& entry:notices){toast(entry.first,entry.second);if(preferences.notifications&&preferences.trayEnabled)tray.notify(entry.first,entry.second);}}
         if(acting){
-            if(operation.valid()&&operation.wait_for(std::chrono::seconds(0))==std::future_status::ready){auto result=operation.get();bool wasPolling=polling;acting=false;polling=false;backupSpace=result.space;{std::lock_guard<std::mutex> lock(progressMutex);operationProgress.clear();}toast(result.message,!result.success);if(wasPolling&&preferences.notifications&&preferences.trayEnabled)tray.notify(result.message,!result.success);publish();lastScan=0;refresh();}
+            if(operation.valid()&&operation.wait_for(std::chrono::seconds(0))==std::future_status::ready){auto result=operation.get();bool wasPolling=polling;acting=false;polling=false;backupSpace=result.space;{std::lock_guard<std::mutex> lock(progressMutex);operationProgress.clear();}if(!wasPolling)toast(result.message,!result.success);if(wasPolling&&preferences.notifications&&preferences.trayEnabled)tray.notify(result.message,!result.success);publish();lastScan=0;refresh();}
             else{std::wstring phase;{std::lock_guard<std::mutex> lock(progressMutex);phase=operationProgress;}if(phase!=lastProgress){lastProgress=phase;publish();}}
         }else{if(scanning&&pending.wait_for(std::chrono::seconds(0))==std::future_status::ready)collect();if(!scanning&&preferences.refreshSeconds>0&&GetTickCount64()-lastScan>=ULONGLONG(preferences.refreshSeconds)*1000)refresh();}return 0;
     case WM_CLOSE:switch(windowCloseDecision(preferences,acting)){case CloseDecision::Tray:hideToTray();break;case CloseDecision::Exit:requestExit();break;case CloseDecision::KeepVisible:showWindow();toast(L"账号操作进行中，请完成或停止后再退出",true);break;}return 0;
@@ -274,6 +299,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show){
         preferences=loadDesktopSettings(config.state,&settingsWarning);
         if(uiSmokeNoTray){auto value=settingsJson(preferences);value["trayEnabled"]=false;preferences=parseDesktopSettings(value);}
         if(config.exe.empty()&&!config.fixture){installation=findInstallation(config.state);config.exe=installation.exe;}
+        // Discover the account data directory after the executable is known: a
+        // portable install keeps its data next to TeleAgent.exe. An explicit
+        // --data-root fixture still takes precedence.
+        if(!config.fixture){dataRootInfo=findDataRoot(config.state,config.exe);if(dataRootInfo.valid&&dataRootInfo.path!=config.root)try{rememberDataRoot(config.state,dataRootInfo.path);}catch(...){}config.root=dataRootInfo.path;}
         if(!pathReport.empty()){writeAtomic(pathReport,Json(Json::Object{{"executable",utf8(config.exe.wstring())},{"available",validExecutable(config.exe)},{"source",installation.source},{"stateDirectory",utf8(config.state.wstring())},{"dataRoot",utf8(config.root.wstring())}}).dump());return validExecutable(config.exe)?0:2;}
         if(!autoOwner.empty()){
             if(report.empty()){privateDirectory(config.state);report=config.state/L"last-switch-result.json";}

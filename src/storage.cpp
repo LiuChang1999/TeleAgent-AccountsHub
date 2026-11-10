@@ -144,7 +144,7 @@ struct Sqlite {
     ~Sqlite(){if(dll)FreeLibrary(dll);}
 };
 void readCookies(Account& a,const Config& c){
-    fs::path db=a.partition/L"Network"/L"Cookies";if(!fs::is_regular_file(db))db=a.partition/L"Cookies";if(!fs::is_regular_file(db)){a.cookieRead=true;return;}
+    fs::path db=a.partition/L"Network"/L"Cookies";if(!fs::is_regular_file(db))db=a.partition/L"Cookies";if(!fs::is_regular_file(db)){a.cookieRead=true;a.cookieFileMissing=true;return;}
     Temp snap(c.state/L"runtime");fs::path dest=snap.path/L"Cookies";std::vector<std::pair<fs::path,fs::path>> files={{db,dest},{fs::path(db.wstring()+L"-wal"),fs::path(dest.wstring()+L"-wal")}};copyStable(files);
     Sqlite sql;sqlite3* handle=nullptr;if(sql.open(utf8(dest.wstring()).c_str(),&handle,2,nullptr)!=0){if(handle)sql.close(handle);fail("Cannot open cookie snapshot");}
     struct DbCloser{Sqlite& sql;sqlite3* h;~DbCloser(){sql.close(h);}}dbcloser{sql,handle};sqlite3_stmt* stmt=nullptr;
@@ -200,17 +200,30 @@ std::vector<DWORD> teleagentProcesses(const Config& c){
     return ids;
 }
 Scan scanAccounts(const Config& c){
-    Scan s;try{s.pointer=checkedPointer(c);if(!fs::is_directory(c.root/L"users")){s.error=L"没有找到 TeleAgent 账号数据目录。";return s;}
+    Scan s;try{
+        // A pointer written by another TeleAgent version must not hide the account list.
+        try{s.pointer=checkedPointer(c);}catch(const std::exception& e){s.pointer=Json();s.warning=L"当前账号指针无法识别（可能来自其他 TeleAgent 版本）："+wide(e.what())+L"。账号仍可查看，切换已暂停。";}
+        if(!fs::is_directory(c.root/L"users")){s.error=L"没有找到 TeleAgent 账号数据目录。";return s;}
         Json notes,sessionCache;
         try{notes=loadJson(c.state/L"account-notes.json");}catch(...){}
         try{sessionCache=loadJson(c.state/L"session-cache.json");}catch(...){}
-        std::vector<fs::path> paths;for(auto& e:fs::directory_iterator(c.root/L"users"))if(e.is_directory()&&validOwner(utf8(e.path().filename().wstring())))paths.push_back(e.path());std::sort(paths.begin(),paths.end());
-        for(auto& path:paths){Account a;a.owner=utf8(path.filename().wstring());a.userId=a.owner.substr(10);a.current=a.owner==s.pointer["ownerDir"].str();a.token=fs::is_regular_file(path/L"app-auth"/L"token.json");a.relogin=fs::exists(path/L"app-auth"/L"relogin-required");
-            if(fs::is_directory(c.root/L"Partitions"))for(auto& p:fs::directory_iterator(c.root/L"Partitions")){auto name=lower(p.path().filename().wstring());auto expected=L"owner%3a"+lower(wide(a.owner));if(p.is_directory()&&(name==expected||name==L"owner_"+lower(wide(a.owner))||name==L"owner:"+lower(wide(a.owner)))){if(!a.partition.empty())fail("Multiple partitions match one owner");a.partition=p.path();}}
+        std::vector<fs::path> paths;
+        {std::error_code ec;for(fs::directory_iterator it(c.root/L"users",fs::directory_options::skip_permission_denied,ec),end;it!=end;it.increment(ec)){if(ec){ec.clear();continue;}bool directory=false;std::string owner;try{directory=it->is_directory();owner=utf8(it->path().filename().wstring());}catch(...){continue;}if(directory&&validOwner(owner))paths.push_back(it->path());}}
+        std::sort(paths.begin(),paths.end());
+        // Index the partition directory once. Older releases used another naming
+        // scheme, so a leftover directory must only affect its own account.
+        std::map<std::wstring,std::vector<fs::path>> partitions;
+        {std::error_code ec;for(fs::directory_iterator it(c.root/L"Partitions",fs::directory_options::skip_permission_denied,ec),end;it!=end;it.increment(ec)){if(ec){ec.clear();continue;}try{if(it->is_directory())partitions[lower(it->path().filename().wstring())].push_back(it->path());}catch(...){}}}
+        auto matches=[&](const std::string& owner){std::vector<fs::path> out;auto o=lower(wide(owner));for(auto& name:{L"owner%3a"+o,L"owner_"+o,L"owner:"+o}){auto it=partitions.find(name);if(it!=partitions.end())out.insert(out.end(),it->second.begin(),it->second.end());}return out;};
+        for(auto& path:paths){std::string owner;try{owner=utf8(path.filename().wstring());}catch(...){continue;}
+            try{Account a;a.owner=owner;a.userId=a.owner.substr(10);a.current=a.owner==s.pointer["ownerDir"].str();a.token=fs::is_regular_file(path/L"app-auth"/L"token.json");a.relogin=fs::exists(path/L"app-auth"/L"relogin-required");
+            auto found=matches(a.owner);
+            if(found.size()==1)a.partition=found[0];
+            else if(found.size()>1){a.partitionAmbiguous=true;a.warning=L"发现多个浏览器分区目录指向同一账号（旧版本升级遗留），该账号的切换已暂停；其余账号不受影响";}
             if(!a.partition.empty()){
                 try{readIdentity(a,c);}catch(const std::exception&){a.warning=L"身份缓存读取失败（可能正在写入或格式已变化）";}
                 try{readCookies(a,c);}catch(const std::exception&){if(!a.warning.empty())a.warning+=L"；";a.warning+=L"Cookie 读取失败，未将其当作无 Cookie";}
-            }else{a.warning=L"未找到对应浏览器分区";a.cookieRead=true;a.cacheRead=true;}
+            }else if(!a.partitionAmbiguous){a.warning=L"未找到对应浏览器分区";a.cookieRead=true;a.cacheRead=true;}
             a.note=notes[a.owner].str();
             const auto& saved=sessionCache[a.owner];
             if(saved["identityVerified"].boolean()){
@@ -226,6 +239,7 @@ Scan scanAccounts(const Config& c){
             }
             if(a.identityMismatch){if(!a.warning.empty())a.warning+=L"；";a.warning+=L"该分区缓存属于其他账号，禁止直接复用；姓名和手机号另按账号 ID 匹配";}
             s.accounts.push_back(std::move(a));
+            }catch(const std::exception& e){Account a;a.owner=owner;a.userId=owner.size()>10?owner.substr(10):std::string();a.warning=L"该账号读取失败，其余账号不受影响："+wide(e.what());s.accounts.push_back(std::move(a));}
         }
         // Legacy partitions can hold another owner's identity. Attribute display
         // metadata by the explicit user ID, never by the partition's directory.
@@ -239,9 +253,9 @@ Scan scanAccounts(const Config& c){
         }
     }catch(const std::exception& e){s.error=L"读取失败："+wide(e.what());}return s;
 }
-void switchAccount(const Config& c,const std::string& owner){ready(c);if(!validOwner(owner))fail("Invalid owner directory");auto path=c.root/L"users"/wide(owner);noReparse(c.root,path);if(!fs::is_directory(path))fail("Account directory is missing");auto scan=scanAccounts(c);if(!scan.error.empty())fail("Cannot validate account data");auto it=std::find_if(scan.accounts.begin(),scan.accounts.end(),[&](auto& a){return a.owner==owner;});if(it==scan.accounts.end())fail("Account not found");if(it->identityMismatch&&!it->relogin)fail("Cached identity does not match this account. Use Re-login to reset only its login state with a backup.");if(!it->cacheRead&&!it->relogin)fail("Cannot validate cached identity; changes are disabled");auto txn=transaction(c,"switch");ready(c);try{replacePointer(c,owner);finish(c,txn);}catch(...){if(fs::exists(txn/L"pointer-before.json"))writeAtomic(c.root/L"current-owner.json",readFile(txn/L"pointer-before.json"));throw;}}
+void switchAccount(const Config& c,const std::string& owner){ready(c);if(!validOwner(owner))fail("Invalid owner directory");auto path=c.root/L"users"/wide(owner);noReparse(c.root,path);if(!fs::is_directory(path))fail("Account directory is missing");auto scan=scanAccounts(c);if(!scan.error.empty())fail("Cannot validate account data");auto it=std::find_if(scan.accounts.begin(),scan.accounts.end(),[&](auto& a){return a.owner==owner;});if(it==scan.accounts.end())fail("Account not found");if(it->partitionAmbiguous)fail("Multiple partitions match one owner; resolve the leftover partition directory first");if(it->identityMismatch&&!it->relogin)fail("Cached identity does not match this account. Use Re-login to reset only its login state with a backup.");if(!it->cacheRead&&!it->relogin)fail("Cannot validate cached identity; changes are disabled");auto txn=transaction(c,"switch");ready(c);try{replacePointer(c,owner);finish(c,txn);}catch(...){if(fs::exists(txn/L"pointer-before.json"))writeAtomic(c.root/L"current-owner.json",readFile(txn/L"pointer-before.json"));throw;}}
 void localLogout(const Config& c,const std::string& owner,bool selectForRelogin){
-    ready(c);if(!validOwner(owner))fail("Invalid owner directory");auto auth=c.root/L"users"/wide(owner)/L"app-auth";noReparse(c.root,auth);if(!fs::is_directory(auth))fail("Account authentication directory is missing");auto scan=scanAccounts(c);if(!scan.error.empty())fail("Cannot validate account data");auto it=std::find_if(scan.accounts.begin(),scan.accounts.end(),[&](auto& a){return a.owner==owner;});if(it==scan.accounts.end())fail("Account not found");auto txn=transaction(c,"local-logout");auto j=loadJson(txn/L"transaction.json");j["owner"]=owner;j["restorePointer"]=selectForRelogin;writeAtomic(txn/L"transaction.json",j.dump());bool markerWritten=false;ready(c);
+    ready(c);if(!validOwner(owner))fail("Invalid owner directory");auto auth=c.root/L"users"/wide(owner)/L"app-auth";noReparse(c.root,auth);if(!fs::is_directory(auth))fail("Account authentication directory is missing");auto scan=scanAccounts(c);if(!scan.error.empty())fail("Cannot validate account data");auto it=std::find_if(scan.accounts.begin(),scan.accounts.end(),[&](auto& a){return a.owner==owner;});if(it==scan.accounts.end())fail("Account not found");if(it->partitionAmbiguous)fail("Multiple partitions match one owner; resolve the leftover partition directory first");auto txn=transaction(c,"local-logout");auto j=loadJson(txn/L"transaction.json");j["owner"]=owner;j["restorePointer"]=selectForRelogin;writeAtomic(txn/L"transaction.json",j.dump());bool markerWritten=false;ready(c);
     try{moveIntoBackup(c,txn,auth/L"token.json");moveIntoBackup(c,txn,auth/L"local-key");moveIntoBackup(c,txn,auth/L"relogin-required");if(!it->partition.empty())moveIntoBackup(c,txn,it->partition);writeAtomic(auth/L"relogin-required","");markerWritten=true;if(selectForRelogin)replacePointer(c,owner);finish(c,txn);}catch(...){if(markerWritten)DeleteFileW((auth/L"relogin-required").c_str());undoMoves(c,txn);if(selectForRelogin&&fs::exists(txn/L"pointer-before.json"))writeAtomic(c.root/L"current-owner.json",readFile(txn/L"pointer-before.json"));throw;}
 }
 void prepareNewLogin(const Config& c){
@@ -287,9 +301,9 @@ void launchTeleagent(const Config& c){if(c.fixture)fail("Launching TeleAgent is 
 std::wstring formatExpiry(int64_t us){if(us<=0)return L"会话 Cookie（无固定到期时间）";uint64_t ticks=uint64_t(us)*10;FILETIME utc{DWORD(ticks),DWORD(ticks>>32)},local{};SYSTEMTIME st{};if(!FileTimeToLocalFileTime(&utc,&local)||!FileTimeToSystemTime(&local,&st))return L"无法解析时间";wchar_t b[64];swprintf(b,64,L"%04u-%02u-%02u %02u:%02u:%02u",st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond);return b;}
 std::wstring cookieSummary(const Account& a){if(!a.cookieRead)return L"读取失败";std::vector<const Cookie*> tokens;for(auto& c:a.cookies)if(c.name=="operToken")tokens.push_back(&c);if(tokens.empty())return L"未发现 operToken";int64_t earliest=std::numeric_limits<int64_t>::max();for(auto* c:tokens){if(!c->persistent||c->expires<=0)return L"会话 Cookie";earliest=std::min(earliest,c->expires);}FILETIME now{};GetSystemTimeAsFileTime(&now);auto micros=int64_t((uint64_t(now.dwHighDateTime)<<32)|now.dwLowDateTime)/10;return formatExpiry(earliest)+(earliest<=micros?L"（已到期）":L"（本地未到期）");}
 Json publicReport(const Scan& s){
-    Json report(Json::Object{});report["error"]=utf8(s.error);Json::Array rows;
+    Json report(Json::Object{});report["error"]=utf8(s.error);report["warning"]=utf8(s.warning);Json::Array rows;
     for(const auto& a:s.accounts){
-        Json j(Json::Object{{"owner",a.owner},{"userId",a.userId},{"current",a.current},{"name",a.name},{"phone",a.phone},{"note",a.note},{"tokenFilePresent",a.token},{"savedSession",a.token&&!a.relogin},{"reloginRequired",a.relogin},{"identityMismatch",a.identityMismatch},{"cookieRead",a.cookieRead},{"cookieSummary",utf8(cookieSummary(a))},{"warning",utf8(a.warning)},{"identityFromOtherPartition",a.identityFromOtherPartition},{"live",a.live},{"infoSource",a.infoSource},{"observedAt",Json::num(a.observedAt)},{"cookieFromCache",a.cookieFromCache},{"cookieObservedAt",Json::num(a.cookieObservedAt)}});
+        Json j(Json::Object{{"owner",a.owner},{"userId",a.userId},{"current",a.current},{"name",a.name},{"phone",a.phone},{"note",a.note},{"tokenFilePresent",a.token},{"savedSession",a.token&&!a.relogin},{"reloginRequired",a.relogin},{"identityMismatch",a.identityMismatch},{"cookieRead",a.cookieRead},{"cookieSummary",utf8(cookieSummary(a))},{"warning",utf8(a.warning)},{"identityFromOtherPartition",a.identityFromOtherPartition},{"live",a.live},{"infoSource",a.infoSource},{"partitionAmbiguous",a.partitionAmbiguous},{"cookieFileMissing",a.cookieFileMissing},{"observedAt",Json::num(a.observedAt)},{"cookieFromCache",a.cookieFromCache},{"cookieObservedAt",Json::num(a.cookieObservedAt)}});
         Json::Array cookies;for(const auto& c:a.cookies)cookies.emplace_back(Json::Object{{"host",c.host},{"name",c.name},{"expiresChromiumMicroseconds",Json::num(c.expires)},{"expiresLocal",utf8(formatExpiry(c.expires))},{"persistent",c.persistent}});
         j["cookies"]=std::move(cookies);rows.push_back(std::move(j));
     }
@@ -321,6 +335,8 @@ int selfTest(const fs::path& directory){
         auto lv=c.root/L"Partitions"/wide("owner%3a"+b)/L"Local Storage"/L"leveldb";
         test("Deleted values supersede old login data",[&]{auto log=readFile(lv/L"000003.log");writeAtomic(lv/L"000003.log",log+record(batch(20,storageKey(),std::nullopt)));auto st=readLevelDb(lv,c.state);require(st.at(storageKey()).deleted,"Tombstone did not win");writeAtomic(lv/L"000003.log",log);});
         test("Orphan log files are ignored",[&]{writeAtomic(lv/L"000001.log",record(batch(999,storageKey(),auth("9999","WRONG"))));auto s=scanAccounts(c);require(s.accounts[1].name=="Test Account B","Orphan log was read");});
+        test("Leftover partition naming only affects its own account",[&]{auto legacy=c.root/L"Partitions"/wide("owner_"+b);privateDirectory(legacy);auto s=scanAccounts(c);require(s.error.empty()&&s.accounts.size()==2,"A leftover partition broke the whole scan");auto target=std::find_if(s.accounts.begin(),s.accounts.end(),[&](auto& x){return x.owner==b;});require(target!=s.accounts.end()&&target->partitionAmbiguous&&!target->cacheRead,"Ambiguous partition was not isolated");rejected([&]{switchAccount(c,b);});rejected([&]{localLogout(c,b);});fs::remove_all(legacy);require(scanAccounts(c).accounts[1].name=="Test Account B","Account did not recover after cleanup");});
+        test("Unsupported owner pointer keeps the account list readable",[&]{auto original=readFile(c.root/L"current-owner.json");writeAtomic(c.root/L"current-owner.json",R"({"generation":2,"ownerDir":"v1_public_1001","tenantId":"corp","userId":"1001"})");auto s=scanAccounts(c);require(s.error.empty()&&s.accounts.size()==2,"Pointer format hid every account");require(!s.warning.empty(),"Pointer warning was not reported");require(!s.accounts[0].current,"Account was marked current without a valid pointer");writeAtomic(c.root/L"current-owner.json",original);});
         test("Identity mismatch is not displayed as the selected account",[&]{auto log=readFile(lv/L"000003.log");writeAtomic(lv/L"000003.log",record(batch(30,storageKey(),auth("1001","Wrong owner"))));auto s=scanAccounts(c);require(s.accounts[1].identityMismatch&&s.accounts[1].name.empty()&&s.accounts[1].phone.empty(),"Mismatched user information was exposed");rejected([&]{switchAccount(c,b);});writeAtomic(lv/L"000003.log",log);});
         test("Historical metadata is attributed by explicit account ID",[&]{auto lvA=c.root/L"Partitions"/wide("owner%3a"+a)/L"Local Storage"/L"leveldb";auto aBefore=readFile(lvA/L"000003.log"),bBefore=readFile(lv/L"000003.log");writeAtomic(lvA/L"000003.log",record(batch(40,storageKey(),auth("1002","Correct B"))));writeAtomic(lv/L"000003.log",record(batch(40,storageKey(),auth("1001","Correct A"))));auto s=scanAccounts(c);require(s.accounts[0].name=="Correct A"&&s.accounts[1].name=="Correct B","Cached metadata was attributed by directory instead of account ID");require(s.accounts[0].identityFromOtherPartition&&s.accounts[1].identityFromOtherPartition,"Historical source was not marked");writeAtomic(lvA/L"000003.log",aBefore);writeAtomic(lv/L"000003.log",bBefore);});
         test("Invalid identity JSON prevents direct account switching",[&]{auto original=readFile(lv/L"000003.log");writeAtomic(lv/L"000003.log",record(batch(40,storageKey(),std::string(1,'\1')+"{broken")));require(!scanAccounts(c).accounts[1].cacheRead,"Malformed JSON was treated as verified cache");rejected([&]{switchAccount(c,b);});writeAtomic(lv/L"000003.log",original);});

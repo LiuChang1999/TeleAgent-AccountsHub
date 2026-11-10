@@ -23,6 +23,16 @@ bool recoverable(const std::string& error){
     for(auto text:{"no saved login session","Cached identity","Could not confirm the target identity","different account","Login cookie has expired"})if(error.find(text)!=std::string::npos)return true;
     return false;
 }
+bool loginCookieExpired(const std::vector<Cookie>& cookies){
+    // Several tokens can exist for different subdomains. A stale leftover must
+    // not invalidate a live session, so the account only counts as expired when
+    // every known token is past its local expiry.
+    bool found=false,valid=false;
+    for(auto& cookie:cookies)if(cookie.name=="operToken"||cookie.name=="operationToken"||cookie.name=="accessToken"){
+        found=true;if(!cookie.persistent||cookie.expires<=0||cookie.expires/1000000-11644473600LL>timestamp())valid=true;
+    }
+    return found&&!valid;
+}
 struct Target{std::string owner,label;};
 using Attempt=std::function<void(const Target&,Progress)>;
 Json run(const Config& c,const std::vector<Target>& targets,std::atomic_bool& stop,const Attempt& login,const Attempt& save,const std::function<void()>& restore,Progress progress,PollNotice notice){
@@ -83,8 +93,7 @@ Json pollAccounts(const Config& c,const std::vector<std::string>& owners,std::at
         auto account=std::find_if(refreshed.accounts.begin(),refreshed.accounts.end(),[&](auto& a){return a.owner==target.owner;});
         if(account==refreshed.accounts.end()||!account->current||account->identityMismatch)throw std::runtime_error("TeleAgent restored a different account");
         if(!account->token||account->relogin)throw std::runtime_error("This account has no saved login session");
-        for(auto& cookie:account->cookies)if((cookie.name=="operToken"||cookie.name=="operationToken"||cookie.name=="accessToken")&&cookie.persistent&&cookie.expires>0&&cookie.expires/1000000-11644473600LL<=timestamp())throw std::runtime_error("Login cookie has expired; sign in manually");
-    },[&](auto& target,auto phase){saveVerifiedAccountSession(c,target.owner,phase);},restore,progress,notice);
+        if(loginCookieExpired(account->cookies))throw std::runtime_error("Login cookie has expired; sign in manually");    },[&](auto& target,auto phase){saveVerifiedAccountSession(c,target.owner,phase);},restore,progress,notice);
 }
 int pollingSelfTest(const fs::path& directory){
     privateDirectory(directory);auto work=directory/(L"poll-fixture-"+std::to_wstring(GetTickCount64()));Config c;c.fixture=true;c.root=work/L"data";c.state=work/L"state";privateDirectory(c.state);Json::Array results;int failed=0;
@@ -97,6 +106,7 @@ int pollingSelfTest(const fs::path& directory){
     test("Restoration failures are recorded and included in the final summary",[&]{std::atomic_bool stop=false;auto result=run(c,{targets.front()},stop,[](auto&,auto){},[](auto&,auto){},[]{throw std::runtime_error("Could not confirm the target identity");},{},{});require(!result["restoreSuccess"].boolean()&&result["summary"].str().find("未能回到原账号")!=std::string::npos);});
     test("Known cookie expiry records a manual login hint and continues",[&]{std::atomic_bool stop=false;int saved=0;auto result=run(c,targets,stop,[&](auto& target,auto){if(target.owner==targets.front().owner)throw std::runtime_error("Login cookie has expired");},[&](auto&,auto){++saved;},{},{},{});require(saved==2&&result["failed"].integer()==1&&!result["halted"].boolean()&&std::get<Json::Array>(result["results"].v).front()["reason"].str().find("手动")!=std::string::npos);});
     test("A stop request before the first account never launches or restores",[&]{std::atomic_bool stop=true;auto unexpected=[](auto&,auto){throw std::runtime_error("Must not launch");};auto result=run(c,targets,stop,unexpected,unexpected,[]{throw std::runtime_error("Must not restore");},{},{});require(result["cancelled"].boolean()&&result["remaining"].integer()==3&&std::get<Json::Array>(result["results"].v).empty());});
+    test("A stale token for another subdomain does not mark a live session expired",[&]{int64_t future=(int64_t(timestamp())+86400)*1000000+11644473600000000LL,past=(int64_t(timestamp())-86400)*1000000+11644473600000000LL;std::vector<Cookie> mixed={{"agent.teleai.com.cn","operationToken",past,true},{".teleai.com.cn","operToken",future,true}};require(!loginCookieExpired(mixed));require(loginCookieExpired({{".teleai.com.cn","operToken",past,true}}));require(!loginCookieExpired({{".teleai.com.cn","operToken",0,false}}));require(!loginCookieExpired({}));});
     test("Fixture mode cannot poll or launch real accounts",[&]{std::atomic_bool stop=false;bool blocked=false;try{pollAccounts(c,{targets.front().owner},stop);}catch(...){blocked=true;}require(blocked);});
     writeAtomic(directory/L"polling-tests.json",Json(Json::Object{{"failed",Json::num(failed)},{"tests",results}}).dump());return failed?2:0;
 }

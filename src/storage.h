@@ -19,13 +19,14 @@ struct Account {
     std::string owner,userId,name,phone,cachedId,cachedName,cachedPhone,note,infoSource;
     bool current=false,token=false,relogin=false,identityMismatch=false,cacheRead=false;
     bool cookieRead=false,identityFromOtherPartition=false,live=false,cookieFromCache=false;
+    bool partitionAmbiguous=false,cookieFileMissing=false;
     int64_t observedAt=0,cookieObservedAt=0;
     std::vector<Cookie> cookies;
     fs::path partition;
     std::wstring warning;
 };
 struct Config {fs::path root,configRoot,state,exe;bool fixture=false;};
-struct Scan {std::vector<Account> accounts;Json pointer;std::wstring error;};
+struct Scan {std::vector<Account> accounts;Json pointer;std::wstring error, warning;};
 std::vector<DWORD> teleagentProcesses(const Config& c);
 Scan scanAccounts(const Config& c);
 void switchAccount(const Config& c,const std::string& owner);
