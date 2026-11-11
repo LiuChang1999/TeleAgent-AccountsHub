@@ -1,6 +1,6 @@
-# TeleAgent 账号工作台 v0.7.1
+# TeleAgent 账号工作台 v0.7.2
 
-[下载 Windows 64 位单文件 EXE](https://github.com/LiuChang1999/TeleAgent-AccountsHub/releases/download/v0.7.1/TeleAgent-Account-Desk-v0.7.1-win64.exe) · [下载分发 ZIP](https://github.com/LiuChang1999/TeleAgent-AccountsHub/releases/download/v0.7.1/TeleAgent-Account-Desk-v0.7.1-win64.zip) · [Release 说明](https://github.com/LiuChang1999/TeleAgent-AccountsHub/releases/tag/v0.7.1) · [使用说明](docs/使用说明-v0.7.1.txt)
+[下载 Windows 64 位单文件 EXE](https://github.com/LiuChang1999/TeleAgent-AccountsHub/releases/download/v0.7.2/TeleAgent-Account-Desk-v0.7.2-win64.exe) · [下载分发 ZIP](https://github.com/LiuChang1999/TeleAgent-AccountsHub/releases/download/v0.7.2/TeleAgent-Account-Desk-v0.7.2-win64.zip) · [Release 说明](https://github.com/LiuChang1999/TeleAgent-AccountsHub/releases/tag/v0.7.2) · [使用说明](docs/使用说明-v0.7.2.txt)
 
 C++20 桌面程序，面向本机 TeleAgent 2.7.1 的账号目录与登录状态测试。新版界面使用系统已有的 Microsoft Edge WebView2，HTML/CSS/JavaScript 已嵌入 EXE；文件读取、身份匹配、切换及备份操作由 C++ 执行。
 
@@ -34,13 +34,20 @@ C++20 桌面程序，面向本机 TeleAgent 2.7.1 的账号目录与登录状态
 
 程序启动和自动刷新不修改 TeleAgent 源数据。切换会先请求应用正常关闭，再结束经路径和进程创建时间核对的 TeleAgent 残留进程；若检测到正在执行的任务，会保留当前会话并暂停切换。
 
-程序启动时自动查找 TeleAgent 账号数据目录：先看上次保存的位置，再依次尝试 `%USERPROFILE%\.local\share\TeleAgent`、`XDG_DATA_HOME`、`APPDATA`/`LOCALAPPDATA`/`ProgramData` 下的 TeleAgent 目录，以及 TeleAgent.exe 所在目录；多个候选都存在时选账号最多的一个并记住。也可以在“设置中心 → 程序与数据”里“重新查找账号目录”或手动“选择账号目录”。配置目录 %USERPROFILE%\.config\TeleAgent 保留原处，不参与移动。
+程序启动时自动查找 TeleAgent 账号数据目录：先看上次保存的位置，再依次尝试 `%USERPROFILE%\.local\share\TeleAgent`、`XDG_DATA_HOME`、`APPDATA`/`LOCALAPPDATA`/`ProgramData` 下的 TeleAgent 目录，以及 TeleAgent.exe 所在目录；多个候选都存在时选账号最多的一个。也可以在“设置中心 → 程序与数据”里“重新查找账号目录”或手动“选择账号目录”。配置目录 %USERPROFILE%\.config\TeleAgent 保留原处，不参与移动。
 
 新版自身数据保存在 `%LOCALAPPDATA%\TeleAgentAccountDesk\manager-data`，按 Windows 用户分别保存，不依赖解压位置是否可写。临时读取快照随后清理；操作备份在其 `backups`，账号会话快照在 `sessions`，备注在 `account-notes.json`。该目录限制为当前 Windows 用户及 SYSTEM 访问。旧版程序旁的 `manager-data` 原样保留；发现后可在“会话备份”页打开旧版目录。旧备份属于原数据目录，不能套用到其他 Windows 用户。
 
-分发给其他用户时，可发送 `dist\TeleAgent-Account-Desk-v0.7.1-win64.exe`，或 `dist\TeleAgent-Account-Desk-v0.7.1-win64.zip`。压缩包采用固定文件清单，仅包含程序、许可证和使用说明，不包含任何账号、备注、Cookie、令牌、会话或备份。对方需要在本机安装 TeleAgent，并自行完成账号登录；通常不需要管理员权限。WebView2 Runtime 仍须在目标电脑上可用。
+分发给其他用户时，可发送 `dist\TeleAgent-Account-Desk-v0.7.2-win64.exe`，或 `dist\TeleAgent-Account-Desk-v0.7.2-win64.zip`。压缩包采用固定文件清单，仅包含程序、许可证和使用说明，不包含任何账号、备注、Cookie、令牌、会话或备份。对方需要在本机安装 TeleAgent，并自行完成账号登录；通常不需要管理员权限。WebView2 Runtime 仍须在目标电脑上可用。
 
 账号切换依赖 TeleAgent 的内部格式，尚非官方接口。升级 TeleAgent 后应重新检查兼容性。账号目录存在、凭据文件存在、本地 Cookie 未到期都不能单独证明服务端登录有效。程序不会恢复服务端已注销或失效的凭据。
+
+## 自定义安装目录兼容修复（本地源码）
+
+- 设置中心 → 程序与数据新增“选择安装文件夹”和“重新查找程序”。文件夹支持直接包含 TeleAgent.exe，或位于 TeleAgent、TeleClaw、TeleClaw/TeleAgent、bin、current 子目录；其他布局可直接选择 EXE。
+- 自动发现支持 TeleClaw 安装记录、改名的快捷方式和公共桌面快捷方式。无安装记录和快捷方式的任意自定义位置，可先运行 TeleAgent 再重新查找，或手动选择并保存。
+- 数据发现补充 EXE 所在目录本身；更换程序后立即更新账号列表，保留有效的已选账号目录。自动检测不再将结果写成手动指定目录。
+- “重新查找账号目录”会跳过旧路径重新检测并保存结果。多个候选按账号数量选择，若需要指定某一目录，请使用“选择账号目录”。
 
 ## 编译与验证
 
@@ -58,7 +65,7 @@ C++20 桌面程序，面向本机 TeleAgent 2.7.1 的账号目录与登录状态
 - “会话备份”可扫描快照和操作备份的空间占用，按账号汇总，预览旧备份清理范围。支持保留最近 1、3、5、10 份；始终保护当前快照、最近恢复所需备份及未完成或来源异常的资料。清理需要确认，备份发生变化时必须重新扫描；链接或目录重定向会阻止清理。清理不操作 TeleAgent 的源账号数据。
 - 右键托盘中的“切换账号”可直接切换；置顶账号优先，其次为最近成功切换的账号。当前账号、缺少登录资料或身份不一致的账号不可直接选择；切换仍执行任务检查和身份核对。
 
-分组和置顶保存在管理器的 `account-organization.json`，新增历史在 `operation-history.json`。新版单文件可执行文件生成在 `build-local\v0.7.1\TeleAgentAccounts.exe`；若旧程序正在运行，可使用 `.\build.ps1 -SkipRootCopy` 先编译，退出旧工作台后再运行新程序。
+分组和置顶保存在管理器的 `account-organization.json`，新增历史在 `operation-history.json`。新版单文件可执行文件生成在 `build-local\v0.7.2\TeleAgentAccounts.exe`；若旧程序正在运行，可使用 `.\build.ps1 -SkipRootCopy` 先编译，退出旧工作台后再运行新程序。
 
 本机可用 GCC / MinGW-w64、CMake 和 Ninja：
 
@@ -108,6 +115,12 @@ WebView2 SDK / 加载库：Microsoft.Web.WebView2 **1.0.3800.47**，来自微软
 .\package.ps1
 ```
 
-测试可直接运行 `build-local\v0.7.1\TeleAgentAccounts.exe` 的上述自测参数，目录中无需 DLL。打包脚本默认使用此目录中的新版本，不会误用仍在运行的根目录旧 EXE。
+测试可直接运行 `build-local\v0.7.2\TeleAgentAccounts.exe` 的上述自测参数，目录中无需 DLL。打包脚本默认使用此目录中的新版本，不会误用仍在运行的根目录旧 EXE。
 
 窗口与后台设置保存在 `desktop-settings.json`，与原有程序路径 `settings.json` 分开。设置自测仅修改隔离测试注册表项，不改真实 Run 启动项。
+
+WebView2 配套（v0.7.2）
+发布 ZIP 小于 10 MB，包含 MicrosoftEdgeWebview2Setup.exe（微软官方在线安装器，首次安装运行时需要联网）及 WebView2Loader.dll。
+完整解压后双击 TeleAgentAccounts.exe；若提示缺少运行时，先手动运行 MicrosoftEdgeWebview2Setup.exe，安装完成后退出并重新打开工作台。
+程序优先使用与内嵌版本字节完全一致的旁置加载库，避免缓存释放受限；没有旁置库时使用内嵌版本。安装器不随程序自动执行。
+微软来源：https://go.microsoft.com/fwlink/p/?LinkId=2124703

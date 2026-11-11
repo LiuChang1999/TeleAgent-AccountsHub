@@ -123,14 +123,32 @@ Json::Array backups(){
     return rows;
 }
 void publish(){updateTray();if(!loaded)return;try{Json j=publicReport(current);j["type"]="state";j["warning"]=utf8(current.warning);j["fixture"]=config.fixture;j["busy"]=acting;j["executable"]=utf8(config.exe.wstring());j["installationSource"]=installation.source;j["executableAvailable"]=validExecutable(config.exe);j["stateDirectory"]=utf8(config.state.wstring());j["dataRoot"]=utf8(config.root.wstring());j["dataRootSource"]=dataRootInfo.source;j["dataRootValid"]=dataRootInfo.valid;j["dataRootAccounts"]=Json::num(dataRootInfo.accounts);j["legacyAvailable"]=!legacyState.empty();{std::lock_guard<std::mutex> lock(progressMutex);j["progress"]=utf8(operationProgress);}j["running"]=!teleagentProcesses(config).empty();j["backups"]=backups();j["organization"]=accountOrganization(config);j["history"]=operationHistory(config);j["backupSpace"]=backupSpace;j["polling"]=polling;j["pollStopRequested"]=polling&&stopPolling.load();j["pollReport"]=loadJson(config.state/L"last-poll.json");j["desktopSettings"]=desktopSettingsState(config,preferences,managerExecutable);j["settingsWarning"]=settingsWarning;SYSTEMTIME now{};GetLocalTime(&now);wchar_t date[64];swprintf(date,64,L"%02u:%02u:%02u",now.wHour,now.wMinute,now.wSecond);j["updated"]=utf8(date);send(j);}catch(const std::exception& e){toast(translate(e),true);}}
+void refresh();
+void collect();
+void applyInstallation(const Installation& found){
+    if(scanning)collect();
+    rememberInstallation(config.state,found.exe);
+    config.exe=found.exe;installation=found;
+    dataRootInfo=findDataRoot(config.state,config.exe);
+    config.root=dataRootInfo.path;
+    current=scanAccounts(config);backupSpace=Json();lastScan=0;publish();
+}
+bool selectInstallationFolder(){
+    if(config.fixture){toast(L"模拟模式不保存真实程序路径",true);return false;}
+    BROWSEINFOW browse{};browse.hwndOwner=window;browse.lpszTitle=L"选择 TeleAgent 安装文件夹";browse.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE item=SHBrowseForFolderW(&browse);if(!item)return false;
+    wchar_t folder[32768]{};bool ok=SHGetPathFromIDListW(item,folder);CoTaskMemFree(item);if(!ok)return false;
+    auto found=findInstallationInFolder(folder);
+    if(found.exe.empty()){toast(L"所选文件夹中未找到有效的 TeleAgent.exe，请选择程序路径",true);return false;}
+    applyInstallation(found);toast(L"已保存安装目录并重新识别账号数据");return true;
+}
 bool selectExecutable(){
     if(config.fixture){toast(L"模拟模式不保存真实程序路径",true);return false;}
     wchar_t file[32768]{};if(!config.exe.empty())wcsncpy(file,config.exe.c_str(),32767);
     OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=window;dialog.lpstrFile=file;dialog.nMaxFile=32768;dialog.lpstrFilter=L"TeleAgent 程序 (TeleAgent.exe)\0TeleAgent.exe\0\0";dialog.lpstrTitle=L"选择已安装的 TeleAgent.exe";dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|OFN_DONTADDTORECENT;
     if(!GetOpenFileNameW(&dialog))return false;
-    rememberInstallation(config.state,fs::path(file));config.exe=fs::path(file);installation={config.exe,"手动选择并保存的路径"};publish();return true;
+    applyInstallation({fs::path(file),"手动选择并保存的路径"});return true;
 }
-void refresh();
 bool selectDataRoot(){
     if(config.fixture){toast(L"模拟模式不保存真实账号目录",true);return false;}
     BROWSEINFOW browse{};browse.hwndOwner=window;browse.lpszTitle=L"选择 TeleAgent 账号数据目录（包含 users 文件夹）";browse.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE;
@@ -140,7 +158,8 @@ bool selectDataRoot(){
     if(fs::is_directory(chosen/L"users"))target=chosen;
     else if(fs::is_directory(chosen/L"TeleAgent"/L"users"))target=chosen/L"TeleAgent";
     else{toast(L"这个目录里没有 users 文件夹，请选择 TeleAgent 的账号数据目录",true);return false;}
-    rememberDataRoot(config.state,target);config.root=target;dataRootInfo={target,"手动选择并保存的目录",true,accountCount(target)};lastScan=0;publish();refresh();toast(L"已切换到所选账号数据目录");return true;
+    if(scanning)collect();
+    rememberDataRoot(config.state,target);config.root=target;dataRootInfo={target,"手动选择并保存的目录",true,accountCount(target)};current=scanAccounts(config);backupSpace=Json();lastScan=0;publish();refresh();toast(L"已切换到所选账号数据目录");return true;
 }
 bool ensureExecutable(){
     if(config.fixture)throw std::runtime_error("Automatic app control is disabled for fixture data");
@@ -199,13 +218,20 @@ void action(const Json& request){
         if(command=="backups"){privateDirectory(config.state);privateDirectory(config.state/L"backups");auto r=reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",(config.state/L"backups").c_str(),nullptr,nullptr,SW_SHOWNORMAL));if(r<=32)throw std::runtime_error("Cannot open backup directory");return;}
         if(command=="legacy-backups"){if(!legacyState.empty())ShellExecuteW(window,L"open",legacyState.c_str(),nullptr,nullptr,SW_SHOWNORMAL);return;}
         if(command=="choose-exe"){selectExecutable();return;}
+        if(command=="choose-install-folder"){selectInstallationFolder();return;}
+        if(command=="find-exe"){
+            if(config.fixture){toast(L"模拟模式不查找真实程序",true);return;}
+            auto found=findInstallation(config.state,false);
+            if(found.exe.empty()){toast(L"未找到 TeleAgent，请先启动一次，或选择安装文件夹",true);return;}
+            applyInstallation(found);toast(L"已找到 TeleAgent 并保存路径");return;
+        }
         if(command=="data-root"){selectDataRoot();return;}
         if(command=="data-root-scan"){
             if(config.fixture){toast(L"模拟模式不查找真实账号目录",true);return;}
-            auto found=findDataRoot(config.state,config.exe);
+            auto found=findDataRoot(config.state,config.exe,false);
             if(!found.valid){toast(L"没有找到账号数据。请先在 TeleAgent 中登录一次，或手动选择目录。",true);return;}
-            bool moved=found.path!=config.root;config.root=found.path;dataRootInfo=found;
-            if(moved)try{rememberDataRoot(config.state,found.path);}catch(...){}
+            bool moved=found.path!=config.root;rememberDataRoot(config.state,found.path);
+            config.root=found.path;dataRootInfo=found;current=scanAccounts(config);backupSpace=Json();
             lastScan=0;publish();refresh();
             toast(moved?L"已找到账号数据（"+wide(found.source)+L"）":L"账号目录正常");
             return;
@@ -233,12 +259,14 @@ void resize(){if(controller){RECT bounds{};GetClientRect(window,&bounds);control
 void startupFailure(const wchar_t* text){if(!uiSmokeDirectory.empty()){uiSmokeFailure=text;return;}MessageBoxW(window,text,L"TeleAgent 账号工作台",MB_OK|MB_ICONERROR);}
 void initWebView(){
     privateDirectory(config.state);privateDirectory(config.state/L"webview");
-    loader=loadEmbeddedWebView(config.state);
+    try{loader=loadEmbeddedWebView(config.state);}catch(const std::exception& e){
+        auto message=L"WebView2 加载库无法加载。请完整解压 ZIP，保留旁置 WebView2Loader.dll 后重试。\n"+wide(e.what());startupFailure(message.c_str());return;
+    }
     using Create=HRESULT(STDAPICALLTYPE*)(PCWSTR,PCWSTR,ICoreWebView2EnvironmentOptions*,ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*);
     auto raw=GetProcAddress(loader,"CreateCoreWebView2EnvironmentWithOptions");Create create=nullptr;static_assert(sizeof(raw)==sizeof(create));std::memcpy(&create,&raw,sizeof(create));
     if(!create){startupFailure(L"WebView2 加载库不完整。");return;}
     auto envHandler=new EnvCallback(L"{4e8a3389-c9d8-4bd2-b6b5-124fee6cc14d}",[](HRESULT result,ICoreWebView2Environment* env)->HRESULT{
-        if(FAILED(result)||!env){startupFailure(L"无法启动 WebView2。请确认 Microsoft Edge WebView2 Runtime 可用。");return S_OK;}environment=env;environment->AddRef();
+        if(FAILED(result)||!env){startupFailure(L"无法启动 WebView2。请运行压缩包内 MicrosoftEdgeWebview2Setup.exe 联网安装或修复运行时，然后退出并重新打开工作台。");return S_OK;}environment=env;environment->AddRef();
         auto controllerHandler=new ControllerCallback(L"{6c4819f3-c9b7-4260-8127-c9f5bde7f68c}",[](HRESULT hr,ICoreWebView2Controller* value)->HRESULT{
             if(FAILED(hr)||!value){startupFailure(L"无法创建账号工作台界面。");return S_OK;}controller=value;controller->AddRef();controller->put_IsVisible(IsWindowVisible(window));controller->get_CoreWebView2(&browser);if(!browser)return E_FAIL;resize();
             ICoreWebView2Settings* settings=nullptr;if(SUCCEEDED(browser->get_Settings(&settings))&&settings){settings->put_IsStatusBarEnabled(FALSE);settings->put_AreDefaultContextMenusEnabled(FALSE);settings->put_AreDevToolsEnabled(FALSE);settings->put_IsZoomControlEnabled(FALSE);settings->put_IsWebMessageEnabled(TRUE);settings->Release();}
@@ -251,7 +279,7 @@ void initWebView(){
             HRSRC resource=FindResourceW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(101),RT_RCDATA);if(!resource){startupFailure(L"界面资源缺失，请重新编译程序。");return E_FAIL;}auto h=LoadResource(GetModuleHandleW(nullptr),resource);auto bytes=static_cast<const char*>(LockResource(h));auto size=SizeofResource(GetModuleHandleW(nullptr),resource);std::string content(bytes,size);trustedDocumentUri=L"data:text/html;charset=utf-8;base64,"+wide(base64(content));auto html=wide(content);auto result=browser->NavigateToString(html.c_str());diagnostic("htmlBytes",Json::num(size));diagnostic("navigateResult",Json::num(result));return S_OK;
         });HRESULT hr=environment->CreateCoreWebView2Controller(window,controllerHandler);controllerHandler->Release();return hr;
     });
-    HRESULT hr=create(nullptr,(config.state/L"webview").c_str(),nullptr,envHandler);envHandler->Release();if(FAILED(hr))startupFailure(L"WebView2 初始化失败。");
+    HRESULT hr=create(nullptr,(config.state/L"webview").c_str(),nullptr,envHandler);envHandler->Release();if(FAILED(hr))startupFailure(L"WebView2 初始化失败。请运行压缩包内 MicrosoftEdgeWebview2Setup.exe 联网安装运行时后重试。");
 }
 LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     if(restoreMessage&&msg==restoreMessage){showWindow();return 0;}
@@ -302,7 +330,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show){
         // Discover the account data directory after the executable is known: a
         // portable install keeps its data next to TeleAgent.exe. An explicit
         // --data-root fixture still takes precedence.
-        if(!config.fixture){dataRootInfo=findDataRoot(config.state,config.exe);if(dataRootInfo.valid&&dataRootInfo.path!=config.root)try{rememberDataRoot(config.state,dataRootInfo.path);}catch(...){}config.root=dataRootInfo.path;}
+        if(!config.fixture){dataRootInfo=findDataRoot(config.state,config.exe);config.root=dataRootInfo.path;}
         if(!pathReport.empty()){writeAtomic(pathReport,Json(Json::Object{{"executable",utf8(config.exe.wstring())},{"available",validExecutable(config.exe)},{"source",installation.source},{"stateDirectory",utf8(config.state.wstring())},{"dataRoot",utf8(config.root.wstring())}}).dump());return validExecutable(config.exe)?0:2;}
         if(!autoOwner.empty()){
             if(report.empty()){privateDirectory(config.state);report=config.state/L"last-switch-result.json";}

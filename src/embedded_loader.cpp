@@ -13,7 +13,12 @@ fs::path loaderPath(const fs::path& state){return state/L"runtime"/L"webview2-1.
 void checkFile(const fs::path& path){auto attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_REPARSE_POINT))throw std::runtime_error("Embedded loader cache must not contain links");}
 }
 HMODULE loadEmbeddedWebView(const fs::path& state){
-    auto bytes=resource(103);auto path=loaderPath(state);privateDirectory(path.parent_path());checkFile(path);
+    auto bytes=resource(103);auto path=fs::absolute(loaderPath(state));
+    // Prefer a byte-identical packaged loader when cache extraction is restricted.
+    wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
+    auto adjacent=fs::path(executable).parent_path()/L"WebView2Loader.dll";
+    bool packaged=false;try{checkFile(adjacent);packaged=readFile(adjacent,1024*1024)==bytes;}catch(...){}
+    if(packaged)path=adjacent;else privateDirectory(path.parent_path());checkFile(path);
     bool matches=false;try{matches=readFile(path,1024*1024)==bytes;}catch(...){}
     if(!matches)writeAtomic(path,bytes);
     // Hold a read-only handle through comparison and mapping so cache bytes
@@ -23,7 +28,7 @@ HMODULE loadEmbeddedWebView(const fs::path& state){
     BY_HANDLE_FILE_INFORMATION info{};DWORD read=0;std::string actual(bytes.size(),'\0');
     bool valid=GetFileInformationByHandle(file,&info)&&!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)&&info.nFileSizeHigh==0&&info.nFileSizeLow==bytes.size()&&ReadFile(file,actual.data(),DWORD(actual.size()),&read,nullptr)&&read==actual.size()&&actual==bytes;
     HMODULE module=valid?LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32):nullptr;CloseHandle(file);
-    if(!module)throw std::runtime_error("Cannot verify or load embedded WebView2 loader");
+    if(!module)throw std::runtime_error("Cannot verify or load WebView2 loader (Windows error "+std::to_string(GetLastError())+")");
     return module;
 }
 std::string embeddedWebViewLicense(){return resource(104);}

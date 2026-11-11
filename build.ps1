@@ -1,4 +1,4 @@
-﻿param([switch]$SkipRootCopy,[string]$OutputDirectory='build-local\v0.7.1')
+﻿param([switch]$SkipRootCopy,[string]$OutputDirectory='build-local\v0.7.2')
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
